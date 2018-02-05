@@ -6,22 +6,23 @@ from orbit_math import time_until_phase, pi
 
 turn_start_altitude = 8000
 turn_end_altitude = 45000
-target_altitude = 125000
+target_altitude = 250000
 
 conn = krpc.connect(name='Launch into orbit')
 vessel = conn.space_center.active_vessel
 
 
-
 # Set up streams for telemetry
 ut = conn.add_stream(getattr, conn.space_center, 'ut')
 apoapsis = conn.add_stream(getattr, vessel.orbit, 'apoapsis_altitude')
-stage_3_resources = vessel.resources_in_decouple_stage(stage=6, cumulative=False)
+stage_3_resources = vessel.resources_in_decouple_stage(stage=2, cumulative=True)
 srb_fuel = conn.add_stream(stage_3_resources.amount, 'SolidFuel')
 rframe = vessel.orbit.body.reference_frame
 altitude = conn.add_stream(getattr, vessel.flight(rframe), 'mean_altitude')
 termv = conn.add_stream(getattr, vessel.flight(rframe), 'terminal_velocity')
 speed = conn.add_stream(getattr, vessel.flight(rframe), 'speed')
+
+assert srb_fuel() > .5
 
 # Pre-launch setup
 vessel.control.sas = False
@@ -66,7 +67,7 @@ while True:
             desired_throttle = vessel.control.throttle = 0.05
 
     # Decrease throttle when approaching target apoapsis
-    if apoapsis() > target_altitude*0.9:
+    if apoapsis() > target_altitude*0.95:
         print('Approaching target apoapsis')
         break
 
@@ -103,6 +104,7 @@ vessel.control.sas_mode = conn.space_center.SASMode.prograde
 # Orientate ship
 print('Orientating ship for circularization burn')
 
+# coast out of atmosphere
 while altitude() < 70500:
     pass
 
@@ -126,13 +128,11 @@ m1 = m0 / math.exp(delta_v/Isp)
 flow_rate = F / Isp
 burn_time = (m0 - m1) / flow_rate
 
-
 # Wait until burn
 print('Waiting until circularization burn')
 burn_ut = ut() + vessel.orbit.time_to_apoapsis - (burn_time/2.)
-lead_time = 30  # warp turns off SAS, give time to reorient
+lead_time = 15  # warp turns off SAS, give time to reorient
 conn.space_center.warp_to(burn_ut - lead_time)
-
 
 # Execute burn
 print('Ready to execute burn')
@@ -141,12 +141,7 @@ while time_to_apoapsis() - (burn_time/2.) > 0:
     pass
 print('Executing burn')
 vessel.control.throttle = 1.0
-time.sleep(burn_time - 0.1)
-print('Fine tuning')
-vessel.control.throttle = 0.05
-remaining_burn = conn.add_stream(node.remaining_burn_vector, node.reference_frame)
-while remaining_burn()[1] > 0:
-    pass
+time.sleep(burn_time)
 vessel.control.throttle = 0.0
 node.remove()
 
@@ -157,6 +152,42 @@ r_mun = mun.orbit.semi_major_axis
 transfer_phase = pi * (1 - (((r_kerbin + r_mun) / (2 * r_mun)) ** 1.5))
 print("phase", transfer_phase)
 
-dt = time_until_phase(vessel, mun, transfer_phase)
-conn.space_center.warp_to(ut() + dt)
-print("Execute prophase burn until Mun is at aphelion")
+# compute node and delta-v for transfer
+dt = time_until_phase(vessel, mun, transfer_phase, conn)
+v1 = math.sqrt(mu / r_kerbin)
+r_ellipse = (r_kerbin + r_mun) / 2
+v2 = math.sqrt(mu * ((2/r_kerbin) - (1/r_ellipse)))
+delta_v = v2 - v1
+print("dV", delta_v)
+
+node = vessel.control.add_node(ut() + dt, prograde=delta_v)
+conn.space_center.warp_to(ut() + dt - 5)
+time.sleep(5)  # reorient
+
+print('Executing transfer burn')
+vessel.control.throttle = 0.0
+time.sleep(0.01)  # let throttle go to zero
+vessel.control.activate_next_stage()  # separation
+time.sleep(0.01)
+vessel.control.activate_next_stage()  # transfer stage
+F = vessel.available_thrust
+Isp = vessel.specific_impulse * 9.82
+m0 = vessel.mass
+m1 = m0 / math.exp(delta_v / Isp)
+flow_rate = F / Isp
+burn_time = (m0 - m1) / flow_rate
+print("burn time", burn_time)
+vessel.control.throttle = 1.0
+time.sleep(burn_time * 0.95)
+vessel.control.throttle = 0.25
+while apoapsis() < r_mun:
+    time.sleep(0.05)
+vessel.control.throttle = 0.0
+node.remove()
+
+# warp to change of influence
+time_to_change_of_soi = vessel.orbit.time_to_soi_change()
+assert time_to_change_of_soi > 0
+conn.space_center.warp_to(ut() + time_to_change_of_soi + 10)
+
+# get new orbit parameters and prepare to stabilize orbit
