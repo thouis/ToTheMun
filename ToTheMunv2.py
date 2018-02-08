@@ -6,7 +6,7 @@ from orbit_math import time_until_phase, pi
 
 turn_start_altitude = 8000
 turn_end_altitude = 45000
-target_altitude = 250000
+target_altitude = 400000
 
 conn = krpc.connect(name='Launch into orbit')
 vessel = conn.space_center.active_vessel
@@ -64,7 +64,7 @@ while True:
             vessel.control.activate_next_stage()
             srbs_separated = True
             print('SRBs separated')
-            desired_throttle = vessel.control.throttle = 0.05
+            desired_throttle = vessel.control.throttle = 0.1
 
     # Decrease throttle when approaching target apoapsis
     if apoapsis() > target_altitude*0.95:
@@ -73,11 +73,12 @@ while True:
 
     if srbs_separated:
         if speed() > termv():
-            desired_throttle *= 0.9
+            desired_throttle *= 0.95
         else:
-            desired_throttle *= 1.0 / 0.9
+            desired_throttle *= 1.0 / 0.95
         desired_throttle = min(1.0, max(0.05, desired_throttle))
         vessel.control.throttle = desired_throttle
+        time.sleep(0.1)  # allow throttle to adjust
 
     if time.time() - last_print >= 10.0:
         print("Ap at %f of target" % (apoapsis() / target_altitude))
@@ -186,8 +187,48 @@ vessel.control.throttle = 0.0
 node.remove()
 
 # warp to change of influence
-time_to_change_of_soi = vessel.orbit.time_to_soi_change()
+time_to_change_of_soi = vessel.orbit.time_to_soi_change
 assert time_to_change_of_soi > 0
 conn.space_center.warp_to(ut() + time_to_change_of_soi + 10)
 
 # get new orbit parameters and prepare to stabilize orbit
+mu = vessel.orbit.body.gravitational_parameter
+r = vessel.orbit.periapsis
+a1 = vessel.orbit.semi_major_axis
+a2 = r
+v1 = math.sqrt(mu*((2./r)-(1./a1)))
+v2 = math.sqrt(mu*((2./r)-(1./a2)))
+delta_v = v2 - v1
+assert delta_v < 0
+node = vessel.control.add_node(
+    ut() + vessel.orbit.time_to_periapsis, prograde=delta_v)  # negative delta v
+
+# Calculate burn time (using rocket equation)
+F = vessel.available_thrust
+Isp = vessel.specific_impulse * 9.82
+m0 = vessel.mass
+m1 = m0 / math.exp(- delta_v/Isp)
+flow_rate = F / Isp
+burn_time = (m0 - m1) / flow_rate
+
+# Wait until burn
+print('Waiting until second circularization burn')
+time_to_periapsis = conn.add_stream(getattr, vessel.orbit, 'time_to_periapsis')
+burn_ut = ut() + time_to_periapsis() - (burn_time / 2)
+lead_time = 15  # warp turns off SAS, give time to reorient
+conn.space_center.warp_to(burn_ut - lead_time)
+
+# use SAS for reotrgrade burn
+vessel.control.sas = True
+time.sleep(0.1)  # allow SAS to turn on
+vessel.control.sas_mode = conn.space_center.SASMode.retrograde
+
+# Orientate ship
+print('Orientating ship for second circularization burn')
+while time_to_periapsis() - (burn_time/2.) > 0:
+    pass
+print('Executing burn - {} seconds'.format(burn_time))
+vessel.control.throttle = 1.0
+time.sleep(burn_time)
+vessel.control.throttle = 0.0
+node.remove()

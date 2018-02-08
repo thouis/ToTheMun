@@ -2,7 +2,7 @@ from numpy import pi, dot, cross, array, arccos, sign
 from numpy.linalg import norm
 
 
-def angle_between(obj1, obj2):
+def angle_between(obj1, obj2, conn):
     frame = obj1.orbit.body.non_rotating_reference_frame
     pos1 = array(obj1.position(frame))
     pos2 = array(obj2.position(frame))
@@ -23,9 +23,9 @@ def angle_between(obj1, obj2):
     return angle
 
 
-def time_until_phase(obj1, obj2, phase):
+def time_until_phase(obj1, obj2, phase, conn):
     ''' find time until angle between obj1 and obj2 is phase '''
-    angle = angle_between(obj1, obj2)
+    angle = angle_between(obj1, obj2, conn)
     print("angle between is", angle)
 
     # find orbital radial velocity
