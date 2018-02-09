@@ -106,8 +106,8 @@ vessel.control.sas_mode = conn.space_center.SASMode.prograde
 print('Orientating ship for circularization burn')
 
 # coast out of atmosphere
-while altitude() < 70500:
-    pass
+# while altitude() < 70500:
+#     pass
 
 # Plan circularization burn (using vis-viva equation)
 print('Planning circularization burn')
@@ -232,3 +232,104 @@ vessel.control.throttle = 1.0
 time.sleep(burn_time)
 vessel.control.throttle = 0.0
 node.remove()
+
+# drop to last stage, prepare to land
+vessel.control.activate_next_stage()  # separate transfer stage
+vessel.control.activate_next_stage()  # landing & return stage
+vessel.control.sas = True
+time.sleep(10)  # let stage float away
+
+# retrograde burn until we land
+vessel.control.sas_mode = conn.space_center.SASMode.retrograde
+
+# this frame has x pointing toward the surface
+srf_frame = vessel.orbit.body.reference_frame
+
+
+def vertical_velocity():
+    velocity = vessel.velocity(srf_frame)
+    position = vessel.position(srf_frame)
+    normp = math.sqrt(sum(p ** 2 for p in position))
+    return sum(v * p / normp for v, p in zip(velocity, position))
+
+
+def status(str):
+    alt = vessel.flight().bedrock_altitude
+    spd = vessel.flight(srf_frame).speed
+    vel = vertical_velocity()
+    ttc = alt / -vel
+    throttle = vessel.control.throttle
+    print("  alt: {:.2f}  ttc: {:2f}  vel: {:.2f}  spd: {:.2f}  thrtl: {:.2f}".format(alt, ttc, vel, spd, throttle))
+
+
+# drop orbital speed and begin fall to surface
+while vessel.flight(srf_frame).speed > 100:
+    status("dropping out of orbit")
+    vessel.control.throttle = 1
+    time.sleep(1)
+
+vessel.control.throttle = 0
+
+# find time to fall to around 50000 m using free fall equation
+y0 = vessel.orbit.radius
+mun_radius = 200000
+y1 = 50000 + mun_radius
+if y1 < y0:
+    mu = vessel.orbit.body.gravitational_parameter
+    tff = math.sqrt(y0 ** 3 / (2 * mu)) * (math.sqrt((y1 / y0) * (1 - y1 / y0)) + math.acos(math.sqrt(y1 / y0)))
+    print("free fall time", tff, y0, y1, mu)
+    if tff > 0:
+        conn.space_center.warp_to(ut() + tff)
+
+
+def adjust_throttle(too_fast, throttle, factor=0.9, minval=0.05):
+    # make sure we can adjust upward from 0
+    if throttle == 0:
+        throttle = minval
+    if too_fast:
+        throttle = throttle / factor
+    else:
+        throttle = throttle * factor
+    # clamp to 0,1 with anything below minval set to 0
+    if throttle < minval:
+        throttle = 0.0
+    elif throttle > 1.0:
+        throttle = 1.0
+    return throttle
+
+
+# landing loop - keep time to crash (= height / vertical velocity) above 50
+# seconds or velocity above 20 m/s, until we reach 100m.
+high_loop_min_fall_rate = 20
+while vessel.flight().bedrock_altitude > 100:
+    rate_of_fall = - vertical_velocity()
+    time_to_crash = (vessel.flight().bedrock_altitude / rate_of_fall)
+    too_fast = (rate_of_fall > high_loop_min_fall_rate) and (time_to_crash < 50)
+    vessel.control.throttle = adjust_throttle(too_fast, vessel.control.throttle, factor=0.97)
+    status("high landing loop")
+    time.sleep(.2)
+
+
+def linterp(a, b, w):
+    # linear interpolation between a & b via weight w
+    if w < 0:
+        return a
+    elif w > 1:
+        return b
+    return a + (b - a) * w
+
+
+# landing - drop below 5 m/s
+while vessel.flight().bedrock_altitude > 5:
+    rate_of_fall = - vertical_velocity()
+    # desired fall = 20 m/s @ 100m, 2 m/s @ 5m
+    desired_fall = linterp(2, high_loop_min_fall_rate, (vessel.flight().bedrock_altitude - 5) / 95)
+    too_fast = rate_of_fall > desired_fall
+    vessel.control.throttle = adjust_throttle(too_fast, vessel.control.throttle, factor=0.97)
+    status("low landing loop")
+    time.sleep(0.01)
+
+status("throttle 0 and deploying gear")
+vessel.control.gear = True
+time.sleep(0.1)
+vessel.control.throttle = 0
